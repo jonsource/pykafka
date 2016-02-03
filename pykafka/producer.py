@@ -149,6 +149,7 @@ class Producer(object):
         self._running = False
         self._update_lock = self._cluster.handler.Lock()
         self.start()
+        self._max_msg_print_length = 40
 
     def __del__(self):
         log.debug("Finalising {}".format(self))
@@ -349,9 +350,10 @@ class Producer(object):
                     if presponse.err == NotLeaderForPartition.ERROR_CODE:
                         # Update cluster metadata to get new leader
                         self._update()
-                    info = "Produce request for {}/{} to {}:{} failed.".format(
+                    info = "Produce request for {}/{} to broker{} @ {}:{} failed.".format(
                         topic,
                         partition,
+                        owned_broker.broker.id,
                         owned_broker.broker.host,
                         owned_broker.broker.port)
                     log.warning(info)
@@ -381,8 +383,10 @@ class Producer(object):
                                                 MessageSizeTooLarge)
                 for msg in mset.messages:
                     if (non_recoverable or msg.produce_attempt >= self._max_retries):
+                        log.error('Message not delivered! {$s}', exc)
                         self._delivery_reports.put(msg, exc)
                     else:
+                        log.info('Re-producing message. Attempt: %s/%s', msg.produce_attempt, self._max_retries)
                         msg.produce_attempt += 1
                         self._produce(msg)
 

@@ -7,6 +7,8 @@ from .topic import Topic
 from .client import KafkaClient
 from .balancedconsumer import BalancedConsumer
 
+print "\n\n\nMY OWN PYKAFKA!\n\n\n"
+
 __version__ = '2.2.0'
 
 
