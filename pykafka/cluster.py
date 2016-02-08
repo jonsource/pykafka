@@ -191,7 +191,9 @@ class Cluster(object):
         self._zookeeper_connect = zookeeper_hosts
         if ':' in self._source_address:
             self._source_port = int(self._source_address.split(':')[1])
+        self.updateing = False
         self.update()
+
 
     def __repr__(self):
         return "<{module}.{name} at {id_} (hosts={hosts})>".format(
@@ -406,7 +408,9 @@ class Cluster(object):
     def update(self):
         """Update known brokers and topics."""
         max_retries = 3
+        self.updating = True
         for i in range(max_retries):
+            log.debug('Updating cluster data, attempt %s/%s', i, max_retries)
             metadata = self._get_metadata()
             if len(metadata.brokers) == 0 and len(metadata.topics) == 0:
                 log.warning('No broker metadata found. If this is a fresh cluster, '
@@ -418,6 +422,8 @@ class Cluster(object):
             self._update_brokers(metadata.brokers)
             try:
                 self._topics._update_topics(metadata.topics)
+                self.updating = False
+                log.debug('Cluster data updated.')
             except LeaderNotAvailable:
                 log.warning("LeaderNotAvailable encountered. This may be "
                             "because one or more partitions have no available replicas.")

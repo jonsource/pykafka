@@ -315,8 +315,9 @@ class Producer(object):
         )
         for msg in message_batch:
             req.add_message(msg, self._topic.name, msg.partition_id)
-        log.debug("Sending %d messages to broker %d",
-                  len(message_batch), owned_broker.broker.id)
+        log.debug("Sending %d messages to broker %d in: %s",
+                  len(message_batch), owned_broker.broker.id, threading.current_thread())
+
 
         def _get_partition_msgs(partition_id, req):
             """Get all the messages for the partitions from the request."""
@@ -333,9 +334,12 @@ class Producer(object):
                 self._delivery_reports.put(msg)
 
         try:
+            owned_broker.action_unsuccessful()
             response = owned_broker.broker.produce_messages(req)
+            log.debug("got response back from broker %s", response)
             if self._required_acks == 0:  # and thus, `response` is None
                 mark_as_delivered(message_batch)
+                owned_broker.action_successful()
                 return
 
             # Kafka either atomically appends or rejects whole MessageSets, so
@@ -362,6 +366,7 @@ class Producer(object):
                         (mset, exc)
                         for mset in _get_partition_msgs(partition, req))
         except SocketDisconnectedError as exc:
+            owned_broker.action_unsuccessful()
             log.warning('Broker %s:%s disconnected. Retrying.',
                         owned_broker.broker.host,
                         owned_broker.broker.port)
@@ -373,7 +378,9 @@ class Producer(object):
             ]
 
         if to_retry:
+            owned_broker.action_unsuccessful()
             self._cluster.handler.sleep(self._retry_backoff_ms / 1000)
+            log.debug("Retrying messages %s", threading.current_thread())
             owned_broker.increment_messages_pending(-1 * len(to_retry))
             for mset, exc in to_retry:
                 # XXX arguably, we should try to check these non_recoverables
@@ -381,14 +388,21 @@ class Producer(object):
                 # right away, rather than failing a whole batch here?
                 non_recoverable = type(exc) in (InvalidMessageSize,
                                                 MessageSizeTooLarge)
+                attempts = {0: 0, 1: 0, 2: 0}
                 for msg in mset.messages:
                     if (non_recoverable or msg.produce_attempt >= self._max_retries):
-                        log.error('Message not delivered! {$s}', exc)
+                        log.error('Message not delivered! %s', exc)
                         self._delivery_reports.put(msg, exc)
                     else:
+                        attempts[msg.produce_attempt]+=1
                         log.info('Re-producing message. Attempt: %s/%s', msg.produce_attempt, self._max_retries)
                         msg.produce_attempt += 1
                         self._produce(msg)
+                log.error("%s", len(mset.messages))
+                if len(mset.messages):
+                    log.warning('Re-produced %s messages with attempts: %s', len(mset.messages), attempts)
+        else:
+            owned_broker.action_successful()
 
     def _wait_all(self):
         """Block until all pending messages are sent
@@ -400,6 +414,16 @@ class Producer(object):
         while any(q.message_is_pending() for q in itervalues(self._owned_brokers)):
             self._cluster.handler.sleep(.3)
             self._raise_worker_exceptions()
+
+    def is_clean(self):
+        #log.debug("owned brokers %s", len(self._owned_brokers))
+        if not len(self._owned_brokers):
+            return None
+        for broker in self._owned_brokers.values():
+            #log.debug("broker clean %r %r", broker.spawn_thread, broker.clean)
+            if not broker.clean:
+                return False
+        return True
 
 
 class OwnedBroker(object):
@@ -433,6 +457,8 @@ class OwnedBroker(object):
         self.queue = deque()
         self.messages_pending = 0
         self.running = True
+        self.spawn_thread = None
+        self.clean = self.action_undetermined()
 
         def queue_reader():
             while self.running:
@@ -444,10 +470,14 @@ class OwnedBroker(object):
                     # surface all exceptions to the main thread
                     self.producer._worker_exception = sys.exc_info()
                     break
-            log.info("Worker exited for broker %s:%s", self.broker.host,
+            log.info("Worker exited for broker %s @ %s:%s",
+                     self.broker.id,
+                     self.broker.host,
                      self.broker.port)
+            log.info("Messages pending %s", self.messages_pending)
+
         log.info("Starting new produce worker for broker %s", broker.id)
-        self.producer._cluster.handler.spawn(queue_reader)
+        self.spawn_thread = self.producer._cluster.handler.spawn(queue_reader)
 
     def stop(self):
         self.running = False
@@ -526,7 +556,19 @@ class OwnedBroker(object):
                 self.slot_available.wait()
             else:
                 raise ProducerQueueFullError("Queue full for broker %d",
-                                             self.broker.id)
+                                               self.broker.id)
+
+    def action_undetermined(self):
+        #log.debug('Action undetermined')
+        self.clean = -1
+
+    def action_successful(self):
+        #log.debug('Action successful')
+        self.clean = 1
+
+    def action_unsuccessful(self):
+        #log.debug('Action unsucccessful')
+        self.clean = 0
 
 
 class _DeliveryReportQueue(threading.local):

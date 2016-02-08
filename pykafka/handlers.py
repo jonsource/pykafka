@@ -98,6 +98,7 @@ class ThreadingHandler(Handler):
         t = threading.Thread(target=target, *args, **kwargs)
         t.daemon = True
         t.start()
+        log.debug("Spawned; %s %s", t.name,t.ident)
         return t
 
 
@@ -156,6 +157,7 @@ class RequestHandler(object):
 
     def start(self):
         """Start the request processor."""
+        log.debug('Spawning request handler:')
         self.t = self._start_thread()
 
     def stop(self):
